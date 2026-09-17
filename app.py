@@ -8,7 +8,7 @@ Chạy local:  streamlit run app.py     |     Deploy: Streamlit Community Cloud
 import json
 import pandas as pd
 import streamlit as st
-from robfund import data, screeners, screeners_price as sp, liquidity, backtest
+from robfund import data, screeners, screeners_price as sp, liquidity, backtest, decision
 
 st.set_page_config(page_title="RoB Fund — Quant Engine", page_icon="📈", layout="wide")
 
@@ -120,6 +120,25 @@ def sech(txt):
     st.markdown(f'<div class="sech">{txt}</div>', unsafe_allow_html=True)
 
 
+STANCE_SHORT = {"down": "PHÒNG THỦ — thị trường giảm", "side": "THẬN TRỌNG — đi ngang",
+                "up_vol": "TĂNG nhưng rung lắc — chọn lọc", "up": "THUẬN LỢI — tăng ổn định"}
+
+
+def fmtint(v):
+    return f"{int(round(v)):,}".replace(",", ".")
+
+
+def fmtvnd(v):
+    return fmtint(v) + "đ"
+
+
+def zbadge(z):
+    def b(lab, v):
+        c = "#16a34a" if v >= 0.5 else ("#e11d48" if v <= -0.5 else "#64748b")
+        return f'<span style="color:{c};font-size:10.5px;margin-right:8px;white-space:nowrap">{lab} {v:+.1f}</span>'
+    return b("Xu hướng", z["trend200"]) + b("Ít b.động", z["lowvol"]) + b("Đà", z["mom"])
+
+
 def table(df, title=None, rule=None, sector_col=None, color=()):
     df = df.drop(columns=["name"]) if "name" in df.columns else df
     cols = [c for c in df.columns if c != sector_col]
@@ -166,12 +185,91 @@ def load_floors():
         return None
 
 
+@st.cache_data
+def load_vnindex():
+    return pd.read_csv("data/vnindex.csv", index_col=0, parse_dates=True)["close"]
+
+
 # =========================== Trang ===========================
 header()
 st.markdown('<div class="rf-demo">⚠️ Sản phẩm học thuật — <b>KHÔNG phải khuyến nghị đầu tư</b>. '
             'Backtest quá khứ không đảm bảo kết quả tương lai.</div>', unsafe_allow_html=True)
 
-t1, t2, t3, t4 = st.tabs(["🏆 Chiến lược", "📊 Quét thị trường", "🧬 GA Backtest", "ℹ️ Giới thiệu"])
+t0, t1, t2, t3, t4 = st.tabs(
+    ["🧭 Quyết định", "🏆 Chiến lược", "📊 Quét thị trường", "🧬 GA Backtest", "ℹ️ Giới thiệu"])
+
+# ---- Tab 0: Quyết định đầu tư (chạy GA ra danh mục cụ thể) ----
+with t0:
+    f = load_fund()
+    px, adtv = load_market()
+    vni = load_vnindex()
+    universe = [s for s in f.index if s in px.columns]
+    sech("🎯 Quyết định đầu tư — chạy GA ra danh mục cụ thể")
+    cc = st.columns([1.4, 1, 1])
+    nav = cc[0].number_input("Vốn đầu tư (VND)", 10_000_000, 100_000_000_000,
+                             500_000_000, 10_000_000)
+    hz = cc[1].selectbox("Khung thời gian", ["short", "mid", "long"], index=1,
+                         format_func=lambda x: {"short": "Ngắn (3 mã)", "mid": "Trung (5 mã)",
+                                                "long": "Dài (8 mã)"}[x])
+    cash0 = cc[2].slider("Tiền mặt mục tiêu", 0.0, 0.6, 0.30, 0.05)
+    if st.button("▶ Chạy toàn bộ & ra quyết định", key="decbtn"):
+        with st.spinner("① Dữ liệu → ② Regime → ③ Factor long-only → ④ GA phân bổ vốn..."):
+            D = decision.build_decision(px, universe, vni, nav=nav, base_cash=cash0, horizon=hz)
+        reg = D["reg"]
+        st.markdown(
+            f'<div class="card" style="border-left:5px solid {reg["color"]}">'
+            f'<b style="color:{reg["color"]}">② Regime: {reg["label"]}</b> — {reg["detail"]}<br>'
+            f'<span style="color:#64748b">🧭 {reg["stance"]}</span></div>', unsafe_allow_html=True)
+        act = f"MUA {D['n_buy']} mã" if D["n_buy"] else "ĐỨNG NGOÀI"
+        k = ('<div class="rf-kpis">'
+             f'<div class="kpi"><div class="lab">Trạng thái thị trường</div>'
+             f'<div class="val" style="font-size:17px;color:{reg["color"]}">{reg["label"]}</div>'
+             f'<div class="sub">{STANCE_SHORT.get(reg["state"], "")}</div></div>'
+             f'<div class="kpi"><div class="lab">Khuyến nghị hành động</div>'
+             f'<div class="val" style="font-size:17px">{act}</div>'
+             f'<div class="sub">độ tin cậy: {D["convict"]}</div></div>'
+             f'<div class="kpi"><div class="lab">Triển khai / Tiền mặt</div>'
+             f'<div class="val">{(1-D["cash_t"])*100:.0f}% / {D["cash_t"]*100:.0f}%</div>'
+             f'<div class="sub">đã phân bổ {fmtvnd(D["invested"])}</div></div>'
+             f'<div class="kpi"><div class="lab">Số vị thế</div>'
+             f'<div class="val">{D["n_buy"]} / {D["max_pos"]}</div>'
+             f'<div class="sub">theo trần IPS</div></div></div>')
+        st.markdown(k, unsafe_allow_html=True)
+        sec = f["sector"].to_dict()
+        rows = ""
+        for r in D["rec"]:
+            rows += ("<tr>"
+                     f'<td class="l"><b>{r["sym"]}</b>'
+                     f'<div style="color:#64748b;font-size:11px">{sec.get(r["sym"], "")}</div></td>'
+                     f'<td><b>{r["weight"]*100:.1f}%</b></td>'
+                     f'<td>{fmtint(r["shares"])}</td>'
+                     f'<td>{fmtvnd(r["actual"])}</td>'
+                     f'<td>{fmtvnd(r["price"])}</td>'
+                     f'<td class="down">{fmtvnd(r["stop"])}</td>'
+                     f'<td class="up">{fmtvnd(r["target"])}</td>'
+                     f'<td class="l">{zbadge(r["z"])}</td></tr>')
+        rows += ('<tr style="border-top:2px solid #e2e8f0"><td class="l"><b>Tiền mặt</b></td>'
+                 f'<td><b>{D["cash_t"]*100:.0f}%</b></td>'
+                 f'<td colspan="6">{fmtvnd(D["nav"]-D["invested"])}</td></tr>')
+        head = ('<th class="l">Mã</th><th>Tỷ trọng</th><th>KL</th><th>Số tiền</th>'
+                '<th>Giá vào</th><th>Stop</th><th>Target</th>'
+                '<th class="l">Điểm factor (z trong rổ)</th>')
+        st.markdown(f'<div class="card"><h3>🎯 Danh sách MUA</h3>'
+                    f'<table class="rf"><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table></div>',
+                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="rf-demo" style="background:#eff6ff;border-color:#bfdbfe;color:#1e40af">'
+            f'<b>Mạch quyết định:</b> ① Dữ liệu → ② Regime (<b>{reg["label"]}</b>) → '
+            f'③ Factor long-only (horizon {hz}, {D["n_pos"]} mã, tái cân bằng {D["reb"]}) → '
+            f'④ Phân bổ <b>{D["scheme"]}</b> theo regime (tiền mặt {D["cash_t"]*100:.0f}%) → '
+            '🎯 Danh sách MUA. Stop −8%, target R/R 1:3. Đây là <b>hỗ trợ quyết định</b>, '
+            'KHÔNG phải khuyến nghị đầu tư.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="card" style="color:#64748b">Nhập vốn & bấm '
+                    '<b>▶ Chạy toàn bộ & ra quyết định</b> — engine sẽ: nhận diện <b>regime</b> '
+                    'thị trường → xếp hạng <b>factor</b> long-only → <b>GA</b> phân bổ vốn → ra '
+                    '<b>danh mục MUA cụ thể</b> (tỷ trọng, KL, giá vào, stop, target, điểm factor).</div>',
+                    unsafe_allow_html=True)
 
 # ---- Tab 1 ----
 with t1:
