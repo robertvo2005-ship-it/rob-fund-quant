@@ -8,7 +8,8 @@ Chạy local:  streamlit run app.py     |     Deploy: Streamlit Community Cloud
 import json
 import pandas as pd
 import streamlit as st
-from robfund import data, screeners, screeners_price as sp, liquidity, backtest, decision, portfolio as pf
+from robfund import (data, screeners, screeners_price as sp, liquidity, backtest,
+                     decision, portfolio as pf, rebalance as rb)
 
 st.set_page_config(page_title="RoB Fund — Quant Engine", page_icon="📈", layout="wide")
 
@@ -320,6 +321,8 @@ with tdm:
     ver = st.session_state.pf_ver
 
     sech("💼 Danh mục đang nắm")
+    if P.get("flash"):
+        st.success(P.pop("flash"))
     if P.get("just_applied"):
         st.success("✅ Danh mục vừa được áp từ tab Quyết định (giá vốn = giá vào ngày áp).")
         P["just_applied"] = False
@@ -397,6 +400,51 @@ with tdm:
         else:
             st.info("Danh mục vừa được lập gần đây — đường NAV sẽ hình thành theo thời gian. "
                     "Đổi 'Ngày lập danh mục' về sớm hơn (VD 2024-01-02) để xem so sánh dài hạn.")
+
+        # ----- Tái cân bằng về danh mục mục tiêu -----
+        realized_cum = int(P.get("realized", 0))
+        if realized_cum:
+            st.markdown('<div class="rf-demo" style="background:#ecfdf5;border-color:#a7f3d0;'
+                        'color:#065f46">💰 Lãi/lỗ đã thực hiện (luỹ kế, đã cộng vào tiền mặt): '
+                        f'<b>{("+" if realized_cum>=0 else "")+fmtvnd(realized_cum)}</b></div>',
+                        unsafe_allow_html=True)
+        sech("🔄 Tái cân bằng về danh mục mục tiêu")
+        Dtar = st.session_state.get("decision")
+        if not Dtar:
+            st.info("Chạy tab 🧭 Quyết định trước để có danh mục mục tiêu, rồi quay lại đây tái cân bằng.")
+        else:
+            orders, nav_cur = rb.compute_orders(positions, cash, Dtar, px)
+            changed = [o for o in orders if o["delta"] != 0]
+            acts = {"MUA MỚI": "up", "MUA THÊM": "up", "BÁN BỚT": "down", "BÁN HẾT": "down"}
+            ohead = ('<th class="l">Mã</th><th class="l">Lệnh</th><th>Đang nắm</th>'
+                     '<th>Mục tiêu</th><th>Chênh (KL)</th><th>Giá</th>')
+            orows = ""
+            for o in orders:
+                cls = acts.get(o["action"], "")
+                dtxt = (f'+{fmtint(o["delta"])}' if o["delta"] > 0 else fmtint(o["delta"])) \
+                    if o["delta"] else "0"
+                orows += (f'<tr><td class="l"><b>{o["sym"]}</b></td>'
+                          f'<td class="l {cls}"><b>{o["action"]}</b></td>'
+                          f'<td>{fmtint(o["cur"])}</td><td>{fmtint(o["tgt"])}</td>'
+                          f'<td class="{cls}">{dtxt}</td><td>{fmtvnd(o["price"])}</td></tr>')
+            st.markdown(f'<div class="card"><h3>Lệnh đề xuất — mục tiêu theo NAV {fmtvnd(nav_cur)}</h3>'
+                        f'<table class="rf"><thead><tr>{ohead}</tr></thead>'
+                        f'<tbody>{orows}</tbody></table></div>', unsafe_allow_html=True)
+            if changed:
+                if st.button("✅ Áp lệnh tái cân bằng (hiện thực hoá lãi/lỗ + ghi nhật ký)", key="rebbtn"):
+                    npos, ncash, realized, jentries = rb.apply_orders(positions, cash, orders)
+                    st.session_state.pf["positions"] = npos
+                    st.session_state.pf["cash"] = ncash
+                    st.session_state.pf["journal"].extend(jentries)
+                    st.session_state.pf["realized"] = int(P.get("realized", 0)) + realized
+                    st.session_state.pf["flash"] = (
+                        f"✅ Đã tái cân bằng {len(jentries)} lệnh · lãi/lỗ đã thực hiện "
+                        f'{("+" if realized>=0 else "")+fmtvnd(realized)} cộng thẳng vào tiền mặt · '
+                        "nhật ký đã cập nhật.")
+                    st.session_state.pf_ver += 1
+                    st.rerun()
+            else:
+                st.caption("✓ Danh mục đang khớp mục tiêu — không cần đảo lệnh.")
     else:
         st.info("Chưa có vị thế hợp lệ — nhập Mã (có trong dữ liệu) / Khối lượng / Giá vốn ở bảng trên.")
 
