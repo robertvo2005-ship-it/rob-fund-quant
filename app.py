@@ -205,6 +205,14 @@ header()
 st.markdown('<div class="rf-demo">⚠️ Sản phẩm học thuật — <b>KHÔNG phải khuyến nghị đầu tư</b>. '
             'Backtest quá khứ không đảm bảo kết quả tương lai.</div>', unsafe_allow_html=True)
 
+# Trạng thái danh mục dùng chung giữa tab Quyết định & Danh mục
+if "pf" not in st.session_state:
+    _p = load_portfolio()
+    st.session_state.pf = dict(cash=int(_p["cash"]), inception=_p["inception"],
+                               positions=[dict(p) for p in _p["positions"]],
+                               journal=load_journal().to_dict("records"))
+    st.session_state.pf_ver = 0
+
 t0, tdm, t1, t2, t3, t4 = st.tabs(
     ["🧭 Quyết định", "💼 Danh mục", "🏆 Chiến lược", "📊 Quét thị trường",
      "🧬 GA Backtest", "ℹ️ Giới thiệu"])
@@ -225,7 +233,11 @@ with t0:
     cash0 = cc[2].slider("Tiền mặt mục tiêu", 0.0, 0.6, 0.30, 0.05)
     if st.button("▶ Chạy toàn bộ & ra quyết định", key="decbtn"):
         with st.spinner("① Dữ liệu → ② Regime → ③ Factor long-only → ④ GA phân bổ vốn..."):
-            D = decision.build_decision(px, universe, vni, nav=nav, base_cash=cash0, horizon=hz)
+            st.session_state.decision = decision.build_decision(
+                px, universe, vni, nav=nav, base_cash=cash0, horizon=hz)
+
+    D = st.session_state.get("decision")
+    if D:
         reg = D["reg"]
         st.markdown(
             f'<div class="card" style="border-left:5px solid {reg["color"]}">'
@@ -275,6 +287,22 @@ with t0:
             f'④ Phân bổ <b>{D["scheme"]}</b> theo regime (tiền mặt {D["cash_t"]*100:.0f}%) → '
             '🎯 Danh sách MUA. Stop −8%, target R/R 1:3. Đây là <b>hỗ trợ quyết định</b>, '
             'KHÔNG phải khuyến nghị đầu tư.</div>', unsafe_allow_html=True)
+        if st.button("✅ Áp vào danh mục", key="applybtn"):
+            _buys = [r for r in D["rec"] if r["shares"] > 0]
+            _today = str(pd.Timestamp.today().normalize().date())
+            st.session_state.pf["positions"] = [
+                dict(sym=r["sym"], shares=r["shares"], cost=r["price"]) for r in _buys]
+            st.session_state.pf["cash"] = int(round(D["nav"] - D["invested"]))
+            st.session_state.pf["inception"] = _today
+            st.session_state.pf["just_applied"] = True
+            for r in _buys:
+                st.session_state.pf["journal"].append(dict(
+                    date=_today, sym=r["sym"], action="MUA", shares=r["shares"],
+                    price=r["price"], note="Áp từ Quyết định (giá vốn = giá vào)"))
+            st.session_state.pf_ver += 1
+            st.success(f"✅ Đã áp {len(_buys)} mã vào danh mục (giá vốn = giá vào) · "
+                       f"tiền mặt còn {fmtvnd(st.session_state.pf['cash'])}. "
+                       "Mở tab 💼 Danh mục để xem NAV & nhật ký.")
     else:
         st.markdown('<div class="card" style="color:#64748b">Nhập vốn & bấm '
                     '<b>▶ Chạy toàn bộ & ra quyết định</b> — engine sẽ: nhận diện <b>regime</b> '
@@ -288,17 +316,20 @@ with tdm:
     vni = load_vnindex()
     fund = load_fund()
     vn100 = [s for s in fund.index if s in px.columns]
-    port = load_portfolio()
-    jr = load_journal()
+    P = st.session_state.pf
+    ver = st.session_state.pf_ver
 
     sech("💼 Danh mục đang nắm")
-    if "hold" not in st.session_state:
-        st.session_state.hold = pd.DataFrame(port["positions"])
+    if P.get("just_applied"):
+        st.success("✅ Danh mục vừa được áp từ tab Quyết định (giá vốn = giá vào ngày áp).")
+        P["just_applied"] = False
     cc = st.columns([1.2, 1])
-    cash = cc[0].number_input("Tiền mặt (VND)", 0, 100_000_000_000, int(port["cash"]), 10_000_000)
-    incep = cc[1].text_input("Ngày lập danh mục", port["inception"])
+    cash = cc[0].number_input("Tiền mặt (VND)", 0, 100_000_000_000, int(P["cash"]),
+                              10_000_000, key=f"cash_{ver}")
+    incep = cc[1].text_input("Ngày lập danh mục", P["inception"], key=f"incep_{ver}")
     edited = st.data_editor(
-        st.session_state.hold, num_rows="dynamic", use_container_width=True, key="holded",
+        pd.DataFrame(P["positions"]), num_rows="dynamic", use_container_width=True,
+        key=f"hold_{ver}",
         column_config={"sym": st.column_config.TextColumn("Mã"),
                        "shares": st.column_config.NumberColumn("Khối lượng", step=100),
                        "cost": st.column_config.NumberColumn("Giá vốn (VND)", step=100)})
@@ -310,12 +341,24 @@ with tdm:
     if positions:
         h = pf.holdings_table(positions, px)
         mv = float(h["value"].sum()); pnl = float(h["pnl"].sum()); nav_now = mv + cash
-        nav = pf.nav_series(positions, cash, incep, px)
-        vni_c, ew = pf.benchmark_curves(incep, px, vni, vn100)
-        reb = pf.rebased_100(nav, vni_c, ew)
-        nav_r = float(reb["Danh mục (NAV)"].iloc[-1] - 100)
-        vni_r = float(reb["VN-Index"].iloc[-1] - 100)
-        v100_r = float(reb["VN100 (EW)"].iloc[-1] - 100)
+        _idx = px.index[px.index >= pd.Timestamp(incep)]
+        has_hist = len(_idx) >= 5
+        reb, nav_r, vni_r, v100_r = None, 0.0, 0.0, 0.0
+        if has_hist:
+            nav = pf.nav_series(positions, cash, incep, px)
+            vni_c, ew = pf.benchmark_curves(incep, px, vni, vn100)
+            reb = pf.rebased_100(nav, vni_c, ew)
+            nav_r = float(reb["Danh mục (NAV)"].iloc[-1] - 100)
+            vni_r = float(reb["VN-Index"].iloc[-1] - 100)
+            v100_r = float(reb["VN100 (EW)"].iloc[-1] - 100)
+        if has_hist:
+            navcard = (f'<div class="val {"up" if nav_r>=0 else "down"}">{nav_r:+.1f}%</div>'
+                       f'<div class="sub">VN-Index {vni_r:+.1f}% · VN100 {v100_r:+.1f}%</div>')
+            alphacard = (f'<div class="val {"up" if nav_r>=vni_r else "down"}">{nav_r-vni_r:+.1f}</div>'
+                         f'<div class="sub">điểm % so với chỉ số</div>')
+        else:
+            navcard = '<div class="val">vừa lập</div><div class="sub">NAV hình thành theo thời gian</div>'
+            alphacard = '<div class="val">—</div><div class="sub">chưa đủ lịch sử</div>'
         st.markdown(
             '<div class="rf-kpis">'
             f'<div class="kpi"><div class="lab">NAV hiện tại</div><div class="val">{fmtvnd(nav_now)}</div>'
@@ -323,12 +366,9 @@ with tdm:
             f'<div class="kpi"><div class="lab">Lãi/lỗ cổ phiếu</div>'
             f'<div class="val {"up" if pnl>=0 else "down"}">{"+" if pnl>=0 else ""}{fmtvnd(pnl)}</div>'
             f'<div class="sub">chưa hiện thực</div></div>'
-            f'<div class="kpi"><div class="lab">NAV từ ngày lập</div>'
-            f'<div class="val {"up" if nav_r>=0 else "down"}">{nav_r:+.1f}%</div>'
-            f'<div class="sub">VN-Index {vni_r:+.1f}% · VN100 {v100_r:+.1f}%</div></div>'
-            f'<div class="kpi"><div class="lab">Alpha vs VN-Index</div>'
-            f'<div class="val {"up" if nav_r>=vni_r else "down"}">{nav_r-vni_r:+.1f}</div>'
-            f'<div class="sub">điểm % so với chỉ số</div></div></div>', unsafe_allow_html=True)
+            f'<div class="kpi"><div class="lab">NAV từ ngày lập</div>{navcard}</div>'
+            f'<div class="kpi"><div class="lab">Alpha vs VN-Index</div>{alphacard}</div></div>',
+            unsafe_allow_html=True)
 
         head = ('<th class="l">Mã</th><th>KL</th><th>Giá vốn</th><th>Giá hiện tại</th>'
                 '<th>Giá trị</th><th>Lãi/lỗ</th><th>%</th>')
@@ -347,12 +387,16 @@ with tdm:
                     f'<tbody>{rows}</tbody></table></div>', unsafe_allow_html=True)
 
         sech("📈 Đường NAV so với VN-Index & VN100")
-        try:
-            st.line_chart(reb, color=["#3b82f6", "#e11d48", "#d97706"])
-        except Exception:
-            st.line_chart(reb)
-        st.caption("Các đường quy về 100 tại ngày lập danh mục · VN100 (EW) = chỉ số trung bình đều "
-                   "giá VN100 · danh mục giả định buy-and-hold từ ngày lập.")
+        if has_hist and reb is not None:
+            try:
+                st.line_chart(reb, color=["#3b82f6", "#e11d48", "#d97706"])
+            except Exception:
+                st.line_chart(reb)
+            st.caption("Các đường quy về 100 tại ngày lập danh mục · VN100 (EW) = chỉ số trung bình "
+                       "đều giá VN100 · danh mục giả định buy-and-hold từ ngày lập.")
+        else:
+            st.info("Danh mục vừa được lập gần đây — đường NAV sẽ hình thành theo thời gian. "
+                    "Đổi 'Ngày lập danh mục' về sớm hơn (VD 2024-01-02) để xem so sánh dài hạn.")
     else:
         st.info("Chưa có vị thế hợp lệ — nhập Mã (có trong dữ liệu) / Khối lượng / Giá vốn ở bảng trên.")
 
@@ -360,7 +404,7 @@ with tdm:
     jhead = ('<th class="l">Ngày</th><th class="l">Mã</th><th class="l">Lệnh</th>'
              '<th>KL</th><th>Giá</th><th class="l">Ghi chú</th>')
     jrows = ""
-    for _, r in jr.iterrows():
+    for r in reversed(P["journal"]):
         act = str(r["action"]); cls = "up" if act == "MUA" else "down"
         jrows += (f'<tr><td class="l">{r["date"]}</td><td class="l"><b>{r["sym"]}</b></td>'
                   f'<td class="l {cls}"><b>{act}</b></td><td>{fmtint(r["shares"])}</td>'
