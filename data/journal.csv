@@ -1,0 +1,9 @@
+date,sym,action,shares,price,note
+2024-01-02,FPT,MUA,1000,69230,Lập danh mục ban đầu
+2024-01-02,HPG,MUA,3000,18564,Lập danh mục ban đầu
+2024-01-02,MWG,MUA,800,40881,Lập danh mục ban đầu
+2024-01-02,VCB,MUA,1000,54991,Lập danh mục ban đầu
+2024-01-02,MSN,MUA,1000,68400,Lập danh mục ban đầu
+2024-06-03,HPG,MUA,1000,21574,Tái cân bằng
+2024-09-16,MWG,BÁN,300,64164,Chốt lời một phần
+2025-02-10,VCB,MUA,500,60720,Tái cân bằng

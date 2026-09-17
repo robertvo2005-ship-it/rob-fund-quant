@@ -1,0 +1,31 @@
+{
+ "cash": 100000000,
+ "inception": "2024-01-02",
+ "positions": [
+  {
+   "sym": "FPT",
+   "shares": 1000,
+   "cost": 69230
+  },
+  {
+   "sym": "HPG",
+   "shares": 3000,
+   "cost": 18564
+  },
+  {
+   "sym": "MWG",
+   "shares": 800,
+   "cost": 40881
+  },
+  {
+   "sym": "VCB",
+   "shares": 1000,
+   "cost": 54991
+  },
+  {
+   "sym": "MSN",
+   "shares": 1000,
+   "cost": 68400
+  }
+ ]
+}

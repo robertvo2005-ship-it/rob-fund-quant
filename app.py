@@ -8,7 +8,7 @@ Chạy local:  streamlit run app.py     |     Deploy: Streamlit Community Cloud
 import json
 import pandas as pd
 import streamlit as st
-from robfund import data, screeners, screeners_price as sp, liquidity, backtest, decision
+from robfund import data, screeners, screeners_price as sp, liquidity, backtest, decision, portfolio as pf
 
 st.set_page_config(page_title="RoB Fund — Quant Engine", page_icon="📈", layout="wide")
 
@@ -190,13 +190,24 @@ def load_vnindex():
     return pd.read_csv("data/vnindex.csv", index_col=0, parse_dates=True)["close"]
 
 
+@st.cache_data
+def load_portfolio():
+    return pf.load_portfolio("data/portfolio.json")
+
+
+@st.cache_data
+def load_journal():
+    return pf.load_journal("data/journal.csv")
+
+
 # =========================== Trang ===========================
 header()
 st.markdown('<div class="rf-demo">⚠️ Sản phẩm học thuật — <b>KHÔNG phải khuyến nghị đầu tư</b>. '
             'Backtest quá khứ không đảm bảo kết quả tương lai.</div>', unsafe_allow_html=True)
 
-t0, t1, t2, t3, t4 = st.tabs(
-    ["🧭 Quyết định", "🏆 Chiến lược", "📊 Quét thị trường", "🧬 GA Backtest", "ℹ️ Giới thiệu"])
+t0, tdm, t1, t2, t3, t4 = st.tabs(
+    ["🧭 Quyết định", "💼 Danh mục", "🏆 Chiến lược", "📊 Quét thị trường",
+     "🧬 GA Backtest", "ℹ️ Giới thiệu"])
 
 # ---- Tab 0: Quyết định đầu tư (chạy GA ra danh mục cụ thể) ----
 with t0:
@@ -270,6 +281,95 @@ with t0:
                     'thị trường → xếp hạng <b>factor</b> long-only → <b>GA</b> phân bổ vốn → ra '
                     '<b>danh mục MUA cụ thể</b> (tỷ trọng, KL, giá vào, stop, target, điểm factor).</div>',
                     unsafe_allow_html=True)
+
+# ---- Tab: Danh mục đang nắm + Nhật ký + đường NAV ----
+with tdm:
+    px, _ = load_market()
+    vni = load_vnindex()
+    fund = load_fund()
+    vn100 = [s for s in fund.index if s in px.columns]
+    port = load_portfolio()
+    jr = load_journal()
+
+    sech("💼 Danh mục đang nắm")
+    if "hold" not in st.session_state:
+        st.session_state.hold = pd.DataFrame(port["positions"])
+    cc = st.columns([1.2, 1])
+    cash = cc[0].number_input("Tiền mặt (VND)", 0, 100_000_000_000, int(port["cash"]), 10_000_000)
+    incep = cc[1].text_input("Ngày lập danh mục", port["inception"])
+    edited = st.data_editor(
+        st.session_state.hold, num_rows="dynamic", use_container_width=True, key="holded",
+        column_config={"sym": st.column_config.TextColumn("Mã"),
+                       "shares": st.column_config.NumberColumn("Khối lượng", step=100),
+                       "cost": st.column_config.NumberColumn("Giá vốn (VND)", step=100)})
+    positions = [dict(sym=str(r["sym"]).upper().strip(), shares=int(r["shares"]), cost=int(r["cost"]))
+                 for _, r in edited.iterrows()
+                 if pd.notna(r.get("sym")) and pd.notna(r.get("shares")) and pd.notna(r.get("cost"))
+                 and str(r["sym"]).upper().strip() in px.columns]
+
+    if positions:
+        h = pf.holdings_table(positions, px)
+        mv = float(h["value"].sum()); pnl = float(h["pnl"].sum()); nav_now = mv + cash
+        nav = pf.nav_series(positions, cash, incep, px)
+        vni_c, ew = pf.benchmark_curves(incep, px, vni, vn100)
+        reb = pf.rebased_100(nav, vni_c, ew)
+        nav_r = float(reb["Danh mục (NAV)"].iloc[-1] - 100)
+        vni_r = float(reb["VN-Index"].iloc[-1] - 100)
+        v100_r = float(reb["VN100 (EW)"].iloc[-1] - 100)
+        st.markdown(
+            '<div class="rf-kpis">'
+            f'<div class="kpi"><div class="lab">NAV hiện tại</div><div class="val">{fmtvnd(nav_now)}</div>'
+            f'<div class="sub">gồm tiền mặt {fmtvnd(cash)}</div></div>'
+            f'<div class="kpi"><div class="lab">Lãi/lỗ cổ phiếu</div>'
+            f'<div class="val {"up" if pnl>=0 else "down"}">{"+" if pnl>=0 else ""}{fmtvnd(pnl)}</div>'
+            f'<div class="sub">chưa hiện thực</div></div>'
+            f'<div class="kpi"><div class="lab">NAV từ ngày lập</div>'
+            f'<div class="val {"up" if nav_r>=0 else "down"}">{nav_r:+.1f}%</div>'
+            f'<div class="sub">VN-Index {vni_r:+.1f}% · VN100 {v100_r:+.1f}%</div></div>'
+            f'<div class="kpi"><div class="lab">Alpha vs VN-Index</div>'
+            f'<div class="val {"up" if nav_r>=vni_r else "down"}">{nav_r-vni_r:+.1f}</div>'
+            f'<div class="sub">điểm % so với chỉ số</div></div></div>', unsafe_allow_html=True)
+
+        head = ('<th class="l">Mã</th><th>KL</th><th>Giá vốn</th><th>Giá hiện tại</th>'
+                '<th>Giá trị</th><th>Lãi/lỗ</th><th>%</th>')
+        rows = ""
+        for sym, r in h.iterrows():
+            cls = "up" if r["pnl"] >= 0 else "down"; sg = "+" if r["pnl"] >= 0 else ""
+            rows += (f'<tr><td class="l"><b>{sym}</b></td><td>{fmtint(r["shares"])}</td>'
+                     f'<td>{fmtvnd(r["cost"])}</td><td>{fmtvnd(r["price"])}</td><td>{fmtvnd(r["value"])}</td>'
+                     f'<td class="{cls}">{sg}{fmtvnd(r["pnl"])}</td>'
+                     f'<td class="{cls}">{r["pct"]*100:+.1f}%</td></tr>')
+        clsT = "up" if pnl >= 0 else "down"
+        rows += (f'<tr style="border-top:2px solid #e2e8f0"><td class="l"><b>Tổng CP</b></td>'
+                 f'<td colspan="3"></td><td><b>{fmtvnd(mv)}</b></td>'
+                 f'<td class="{clsT}"><b>{("+" if pnl>=0 else "")}{fmtvnd(pnl)}</b></td><td></td></tr>')
+        st.markdown(f'<div class="card"><table class="rf"><thead><tr>{head}</tr></thead>'
+                    f'<tbody>{rows}</tbody></table></div>', unsafe_allow_html=True)
+
+        sech("📈 Đường NAV so với VN-Index & VN100")
+        try:
+            st.line_chart(reb, color=["#3b82f6", "#e11d48", "#d97706"])
+        except Exception:
+            st.line_chart(reb)
+        st.caption("Các đường quy về 100 tại ngày lập danh mục · VN100 (EW) = chỉ số trung bình đều "
+                   "giá VN100 · danh mục giả định buy-and-hold từ ngày lập.")
+    else:
+        st.info("Chưa có vị thế hợp lệ — nhập Mã (có trong dữ liệu) / Khối lượng / Giá vốn ở bảng trên.")
+
+    sech("📒 Nhật ký giao dịch")
+    jhead = ('<th class="l">Ngày</th><th class="l">Mã</th><th class="l">Lệnh</th>'
+             '<th>KL</th><th>Giá</th><th class="l">Ghi chú</th>')
+    jrows = ""
+    for _, r in jr.iterrows():
+        act = str(r["action"]); cls = "up" if act == "MUA" else "down"
+        jrows += (f'<tr><td class="l">{r["date"]}</td><td class="l"><b>{r["sym"]}</b></td>'
+                  f'<td class="l {cls}"><b>{act}</b></td><td>{fmtint(r["shares"])}</td>'
+                  f'<td>{fmtvnd(r["price"])}</td>'
+                  f'<td class="l" style="color:#64748b">{r["note"]}</td></tr>')
+    st.markdown(f'<div class="card"><table class="rf"><thead><tr>{jhead}</tr></thead>'
+                f'<tbody>{jrows}</tbody></table></div>', unsafe_allow_html=True)
+    st.caption("Dữ liệu danh mục & nhật ký là MẪU (chỉnh sửa bảng phía trên để cập nhật NAV theo thời gian thực).")
+
 
 # ---- Tab 1 ----
 with t1:
